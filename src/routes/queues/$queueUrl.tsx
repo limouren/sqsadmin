@@ -1,53 +1,53 @@
-import { useState, useEffect } from 'react'
-import { createFileRoute, Link } from '@tanstack/react-router'
-import QueueDetail from '#/components/QueueDetail'
-import { QueueInfo } from '#/lib/sqs'
+import { useState, useEffect } from 'react';
+import { createFileRoute, Link } from '@tanstack/react-router';
+import QueueDetail from '#/components/QueueDetail';
+import { QueueInfo } from '#/lib/sqs';
 
 export const Route = createFileRoute('/queues/$queueUrl')({
   component: QueueDetailPage,
-})
+});
 
 function QueueDetailPage() {
-  const { queueUrl } = Route.useParams()
-  const [queueInfo, setQueueInfo] = useState<QueueInfo | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const { queueUrl } = Route.useParams();
+  const [queueInfo, setQueueInfo] = useState<QueueInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const fetchQueueInfo = async () => {
       try {
-        setLoading(true)
+        setLoading(true);
         if (!queueUrl) {
-          throw new Error('Queue URL parameter is missing')
+          throw new Error('Queue URL parameter is missing');
         }
 
-        const response = await fetch(`/api/queues/${queueUrl}`)
+        const response = await fetch(`/api/queues/${queueUrl}`);
 
         if (!response.ok) {
-          throw new Error(`Failed to fetch queue: ${response.statusText}`)
+          throw new Error(`Failed to fetch queue: ${response.statusText}`);
         }
 
-        const queue = await response.json()
+        const queue = await response.json();
 
         if (queue) {
-          setQueueInfo(queue)
+          setQueueInfo(queue);
         } else {
-          throw new Error('Queue not found')
+          throw new Error('Queue not found');
         }
       } catch (err) {
         setError(
           err instanceof Error
             ? err.message
             : 'Failed to fetch queue information',
-        )
-        console.error('Error fetching queue info:', err)
+        );
+        console.error('Error fetching queue info:', err);
       } finally {
-        setLoading(false)
+        setLoading(false);
       }
-    }
+    };
 
-    fetchQueueInfo()
-  }, [queueUrl])
+    fetchQueueInfo();
+  }, [queueUrl]);
 
   if (loading) {
     return (
@@ -56,7 +56,7 @@ function QueueDetailPage() {
           Loading queue information...
         </div>
       </div>
-    )
+    );
   }
 
   if (error || !queueInfo) {
@@ -78,8 +78,10 @@ function QueueDetailPage() {
           ← Back to queue list
         </Link>
       </div>
-    )
+    );
   }
+
+  const isDeadLetterQueue = queueInfo.deadLetterSourceQueues.length > 0;
 
   return (
     <div className="container mx-auto px-4 py-4">
@@ -123,6 +125,16 @@ function QueueDetailPage() {
             </svg>
             Produce Message
           </button>
+          {isDeadLetterQueue && (
+            <button
+              onClick={() =>
+                document.getElementById('redrive-all-messages-button')?.click()
+              }
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+            >
+              Redrive All Messages
+            </button>
+          )}
         </div>
       </header>
 
@@ -135,5 +147,5 @@ function QueueDetailPage() {
         />
       </main>
     </div>
-  )
+  );
 }

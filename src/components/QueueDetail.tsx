@@ -1,15 +1,33 @@
-import { useState, Fragment, useMemo } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Message } from '#/lib/sqs'
-import 'react-json-view-lite/dist/index.css'
-import AceEditor from './AceEditor'
-import RedriveMessageModal from './RedriveMessageModal'
+import { useState, Fragment, useMemo } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Message, QueueInfo } from '#/lib/sqs';
+import { groupQueuesByDeadLetterSources } from '#/lib/queue';
+import 'react-json-view-lite/dist/index.css';
+import AceEditor from './AceEditor';
+import RedriveMessageModal from './RedriveMessageModal';
+import RedriveAllMessagesModal from './RedriveAllMessagesModal';
+import CancelMoveTaskModal from './CancelMoveTaskModal';
 
 interface QueueDetailProps {
-  queueUrl: string
-  queueName: string
-  queueAttributes?: Record<string, string>
-  deadLetterSourceQueues?: string[]
+  queueUrl: string;
+  queueName: string;
+  queueAttributes?: Record<string, string>;
+  deadLetterSourceQueues?: string[];
+}
+
+interface MessageMoveTaskStatusResponse {
+  hasRunningTask: boolean;
+  runningTask?: {
+    TaskHandle?: string;
+    Status?: string;
+    ApproximateNumberOfMessagesMoved?: number;
+    ApproximateNumberOfMessagesToMove?: number;
+  };
+}
+
+interface QueueListResponse {
+  items: QueueInfo[];
+  nextToken?: string;
 }
 
 export default function QueueDetail({
@@ -18,26 +36,26 @@ export default function QueueDetail({
   queueAttributes,
   deadLetterSourceQueues = [],
 }: QueueDetailProps) {
-  const queryClient = useQueryClient()
-  const [actionError, setActionError] = useState<string | null>(null)
-  const [messageInput, setMessageInput] = useState('{}')
-  const [sendingMessage, setSendingMessage] = useState(false)
-  const [sendError, setSendError] = useState<string | null>(null)
-  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(false)
-  const [isValidJson, setIsValidJson] = useState(true)
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc')
+  const queryClient = useQueryClient();
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [messageInput, setMessageInput] = useState('{}');
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(false);
+  const [isValidJson, setIsValidJson] = useState(true);
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
 
-  const messagesQueryKey = ['messages', queueUrl]
+  const messagesQueryKey = ['messages', queueUrl];
 
   const fetchMessages = async (): Promise<Message[]> => {
     const response = await fetch(
       `/api/queues/${queueUrl}/messages?mode=peek&max=50`,
-    )
+    );
     if (!response.ok) {
-      throw new Error(`Failed to fetch messages: ${response.statusText}`)
+      throw new Error(`Failed to fetch messages: ${response.statusText}`);
     }
-    return response.json()
-  }
+    return response.json();
+  };
 
   const {
     data: messages = [],
@@ -48,183 +66,359 @@ export default function QueueDetail({
     queryKey: messagesQueryKey,
     queryFn: fetchMessages,
     refetchInterval: autoRefreshEnabled ? 5000 : false,
-  })
+  });
 
-  const loading = isLoading || isFetching
+  const loading = isLoading || isFetching;
   const error = useMemo(() => {
-    if (actionError) return actionError
+    if (actionError) return actionError;
     if (fetchError)
       return fetchError instanceof Error
         ? fetchError.message
-        : 'Failed to fetch messages'
-    return null
-  }, [actionError, fetchError])
+        : 'Failed to fetch messages';
+    return null;
+  }, [actionError, fetchError]);
 
-  const mutate = (
-    updater?: (previous: Message[] | undefined) => Message[],
-  ) => {
+  const mutate = (updater?: (previous: Message[] | undefined) => Message[]) => {
     if (updater) {
-      queryClient.setQueryData(messagesQueryKey, updater)
+      queryClient.setQueryData(messagesQueryKey, updater);
     } else {
-      queryClient.invalidateQueries({ queryKey: messagesQueryKey })
+      queryClient.invalidateQueries({ queryKey: messagesQueryKey });
     }
-  }
+  };
 
   const toggleAutoRefresh = () => {
-    setAutoRefreshEnabled((previous) => !previous)
-  }
+    setAutoRefreshEnabled((previous) => !previous);
+  };
 
   const handleSendMessage = async () => {
     try {
-      setSendingMessage(true)
-      setSendError(null)
+      setSendingMessage(true);
+      setSendError(null);
 
-      let messageBody
+      let messageBody;
       try {
-        messageBody = JSON.parse(messageInput)
+        messageBody = JSON.parse(messageInput);
       } catch (e) {
         setSendError(
           'Invalid JSON format: ' +
             (e instanceof Error ? e.message : 'Unknown error'),
-        )
-        setSendingMessage(false)
-        return
+        );
+        setSendingMessage(false);
+        return;
       }
 
       const response = await fetch(`/api/queues/${queueUrl}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: messageBody }),
-      })
+      });
 
       if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error || 'Failed to send message')
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to send message');
       }
 
-      setMessageInput('{}')
-      mutate()
+      setMessageInput('{}');
+      mutate();
     } catch (err) {
       setSendError(
         err instanceof Error ? err.message : 'Failed to send message',
-      )
-      console.error('Error sending message:', err)
+      );
+      console.error('Error sending message:', err);
     } finally {
-      setSendingMessage(false)
+      setSendingMessage(false);
     }
-  }
+  };
 
   const validateJson = (input: string) => {
     try {
-      JSON.parse(input)
-      setIsValidJson(true)
-      setSendError(null)
-      return true
+      JSON.parse(input);
+      setIsValidJson(true);
+      setSendError(null);
+      return true;
     } catch (e) {
-      setIsValidJson(false)
+      setIsValidJson(false);
       setSendError(
         'Invalid JSON format: ' +
           (e instanceof Error ? e.message : 'Unknown error'),
-      )
-      return false
+      );
+      return false;
     }
-  }
+  };
 
   const [deletingMessageIds, setDeletingMessageIds] = useState<Set<string>>(
     new Set(),
-  )
+  );
   const [redrivingMessageIds, setRedrivingMessageIds] = useState<Set<string>>(
     new Set(),
-  )
+  );
   const [selectedMessageForRedrive, setSelectedMessageForRedrive] =
-    useState<Message | null>(null)
-  const [redriveError, setRedriveError] = useState<string | null>(null)
+    useState<Message | null>(null);
+  const [redriveError, setRedriveError] = useState<string | null>(null);
+  const [isRedriveAllModalOpen, setIsRedriveAllModalOpen] = useState(false);
+  const [redrivingAllMessages, setRedrivingAllMessages] = useState(false);
+  const [redriveAllError, setRedriveAllError] = useState<string | null>(null);
+  const [cancellingRedriveTask, setCancellingRedriveTask] = useState(false);
+  const [cancelRedriveError, setCancelRedriveError] = useState<string | null>(
+    null,
+  );
+  const [isCancelMoveTaskModalOpen, setIsCancelMoveTaskModalOpen] =
+    useState(false);
+
+  const isDeadLetterQueue = deadLetterSourceQueues.length > 0;
+  const redriveTaskStatusQueryKey = ['redrive-task-status', queueUrl];
+
+  const fetchAccessibleQueueUrls = async (): Promise<string[]> => {
+    const allQueueUrls: string[] = [];
+    let nextToken: string | undefined;
+
+    do {
+      const params = new URLSearchParams();
+      params.set('limit', '100');
+      if (nextToken) {
+        params.set('nextToken', nextToken);
+      }
+
+      const response = await fetch(`/api/queues?${params.toString()}`);
+
+      if (!response.ok) {
+        throw new Error(
+          `Failed to fetch queue options for redrive: ${response.statusText}`,
+        );
+      }
+
+      const data: QueueListResponse = await response.json();
+      allQueueUrls.push(...data.items.map((queue) => queue.url));
+      nextToken = data.nextToken;
+    } while (nextToken);
+
+    return Array.from(new Set(allQueueUrls));
+  };
+
+  const { data: accessibleQueueUrls = [] } = useQuery({
+    queryKey: ['accessible-queue-urls-for-redrive'],
+    queryFn: fetchAccessibleQueueUrls,
+  });
+
+  const redriveTargetQueueUrls =
+    accessibleQueueUrls.length > 0
+      ? accessibleQueueUrls
+      : deadLetterSourceQueues;
+
+  const groupedRedriveTargetQueueOptions = useMemo(
+    () =>
+      groupQueuesByDeadLetterSources(
+        redriveTargetQueueUrls,
+        deadLetterSourceQueues,
+      ),
+    [redriveTargetQueueUrls, deadLetterSourceQueues],
+  );
+
+  const fetchRedriveTaskStatus =
+    async (): Promise<MessageMoveTaskStatusResponse> => {
+      const response = await fetch(`/api/queues/${queueUrl}/redrive-all`);
+
+      if (!response.ok) {
+        throw new Error(
+          `Failed to fetch redrive task status: ${response.statusText}`,
+        );
+      }
+
+      return response.json();
+    };
+
+  const { data: redriveTaskStatus } = useQuery({
+    queryKey: redriveTaskStatusQueryKey,
+    queryFn: fetchRedriveTaskStatus,
+    enabled: isDeadLetterQueue,
+    refetchInterval: (query) =>
+      query.state.data?.hasRunningTask ? 5000 : false,
+  });
 
   const handleOpenRedriveModal = (message: Message) => {
-    setSelectedMessageForRedrive(message)
-    setRedriveError(null)
-  }
+    setSelectedMessageForRedrive(message);
+    setRedriveError(null);
+  };
 
   const handleCloseRedriveMessageModal = () => {
-    setSelectedMessageForRedrive(null)
-    setRedriveError(null)
-  }
+    setSelectedMessageForRedrive(null);
+    setRedriveError(null);
+  };
 
-  const handleRedriveMessage = async (targetQueueUrl: string) => {
-    if (!selectedMessageForRedrive) return
+  const handleOpenRedriveAllModal = () => {
+    setRedriveAllError(null);
+    setCancelRedriveError(null);
+    setIsRedriveAllModalOpen(true);
+  };
 
-    const messageId = selectedMessageForRedrive.id
+  const handleCloseRedriveAllModal = () => {
+    setIsRedriveAllModalOpen(false);
+    setRedriveAllError(null);
+    setCancelRedriveError(null);
+  };
+
+  const handleRedriveMessage = async (
+    targetQueueUrl: string,
+    messageBody: string,
+  ) => {
+    if (!selectedMessageForRedrive) return;
+
+    const messageId = selectedMessageForRedrive.id;
 
     try {
-      setRedrivingMessageIds((prev) => new Set([...prev, messageId]))
-      setRedriveError(null)
+      setRedrivingMessageIds((prev) => new Set([...prev, messageId]));
+      setRedriveError(null);
 
       const response = await fetch(`/api/queues/${queueUrl}/messages/redrive`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messageId, targetQueueUrl }),
-      })
+        body: JSON.stringify({ messageId, targetQueueUrl, messageBody }),
+      });
 
       if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error)
+        const errorData = await response.json();
+        throw new Error(errorData.error);
       }
 
       mutate((previous) =>
         previous ? previous.filter((msg) => msg.id !== messageId) : [],
-      )
-      setSelectedMessageForRedrive(null)
+      );
+      setSelectedMessageForRedrive(null);
     } catch (err) {
       setRedriveError(
         err instanceof Error ? err.message : 'Failed to redrive message',
-      )
-      console.error('Error redriving message:', err)
+      );
+      console.error('Error redriving message:', err);
     } finally {
       setRedrivingMessageIds((prev) => {
-        const updated = new Set(prev)
-        updated.delete(messageId)
-        return updated
-      })
+        const updated = new Set(prev);
+        updated.delete(messageId);
+        return updated;
+      });
     }
-  }
+  };
 
   const handleDeleteMessage = async (message: Message) => {
     try {
-      const messageId = message.id
-      setDeletingMessageIds((prev) => new Set([...prev, messageId]))
+      const messageId = message.id;
+      setDeletingMessageIds((prev) => new Set([...prev, messageId]));
 
       const response = await fetch(`/api/queues/${queueUrl}/messages`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messageId, peekMode: true }),
-      })
+      });
 
       if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error || 'Failed to delete message')
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to delete message');
       }
 
       mutate((previous) =>
         previous ? previous.filter((msg) => msg.id !== messageId) : [],
-      )
+      );
     } catch (err) {
       setActionError(
         err instanceof Error ? err.message : 'Failed to delete message',
-      )
-      console.error('Error deleting message:', err)
+      );
+      console.error('Error deleting message:', err);
     } finally {
       setDeletingMessageIds((prev) => {
-        const updated = new Set(prev)
-        updated.delete(message.id)
-        return updated
-      })
+        const updated = new Set(prev);
+        updated.delete(message.id);
+        return updated;
+      });
     }
-  }
+  };
+
+  const handleRedriveAllMessages = async (
+    targetQueueUrl: string,
+    maxNumberOfMessagesPerSecond?: number,
+  ) => {
+    try {
+      setRedrivingAllMessages(true);
+      setRedriveAllError(null);
+
+      const response = await fetch(`/api/queues/${queueUrl}/redrive-all`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetQueueUrl,
+          maxNumberOfMessagesPerSecond,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to start redrive task');
+      }
+
+      setIsRedriveAllModalOpen(false);
+      queryClient.invalidateQueries({ queryKey: redriveTaskStatusQueryKey });
+      mutate();
+    } catch (err) {
+      setRedriveAllError(
+        err instanceof Error ? err.message : 'Failed to start redrive task',
+      );
+      console.error('Error starting redrive-all task:', err);
+    } finally {
+      setRedrivingAllMessages(false);
+    }
+  };
+
+  const handleOpenCancelMoveTaskModal = () => {
+    setCancelRedriveError(null);
+    setIsCancelMoveTaskModalOpen(true);
+  };
+
+  const handleCloseCancelMoveTaskModal = () => {
+    if (!cancellingRedriveTask) {
+      setIsCancelMoveTaskModalOpen(false);
+    }
+  };
+
+  const handleCancelRedriveTask = async () => {
+    const taskHandle = redriveTaskStatus?.runningTask?.TaskHandle;
+
+    if (!taskHandle) {
+      setCancelRedriveError('No running redrive task handle found to cancel.');
+      return;
+    }
+
+    try {
+      setCancellingRedriveTask(true);
+      setCancelRedriveError(null);
+
+      const response = await fetch(`/api/queues/${queueUrl}/redrive-all`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskHandle }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to cancel redrive task');
+      }
+
+      setIsCancelMoveTaskModalOpen(false);
+      queryClient.invalidateQueries({ queryKey: redriveTaskStatusQueryKey });
+      mutate();
+    } catch (err) {
+      setCancelRedriveError(
+        err instanceof Error ? err.message : 'Failed to cancel redrive task',
+      );
+      console.error('Error cancelling redrive task:', err);
+    } finally {
+      setCancellingRedriveTask(false);
+    }
+  };
 
   const formatMessageBody = (body: string) => {
     try {
-      const parsedBody = JSON.parse(body)
-      const formattedJson = JSON.stringify(parsedBody, null, 2)
+      const parsedBody = JSON.parse(body);
+      const formattedJson = JSON.stringify(parsedBody, null, 2);
 
       return (
         <div className="rounded overflow-hidden">
@@ -252,36 +446,36 @@ export default function QueueDetail({
             style={{ borderRadius: '4px' }}
           />
         </div>
-      )
+      );
     } catch {
       return (
         <pre className="whitespace-pre-wrap font-mono bg-gray-100 dark:bg-gray-900 text-gray-800 dark:text-gray-200 p-3 rounded">
           {body}
         </pre>
-      )
+      );
     }
-  }
+  };
 
   const getMessageStatus = (message: Message) => {
-    const attributes = message.attributes || {}
-    let status = 'Available'
+    const attributes = message.attributes || {};
+    let status = 'Available';
     let statusClass =
-      'bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-100'
+      'bg-green-100 text-green-800 dark:bg-green-800 dark:text-green-100';
 
     if (
       attributes.ApproximateFirstReceiveTimestamp &&
       attributes.SentTimestamp
     ) {
-      const sentTime = parseInt(attributes.SentTimestamp, 10)
+      const sentTime = parseInt(attributes.SentTimestamp, 10);
       const receiveTime = parseInt(
         attributes.ApproximateFirstReceiveTimestamp,
         10,
-      )
+      );
 
       if (receiveTime - sentTime > 1000) {
-        status = 'Delayed'
+        status = 'Delayed';
         statusClass =
-          'bg-yellow-100 text-yellow-800 dark:bg-yellow-800 dark:text-yellow-100'
+          'bg-yellow-100 text-yellow-800 dark:bg-yellow-800 dark:text-yellow-100';
       }
     }
 
@@ -289,14 +483,14 @@ export default function QueueDetail({
       attributes.ApproximateReceiveCount &&
       parseInt(attributes.ApproximateReceiveCount, 10) > 0
     ) {
-      status = 'In Flight'
+      status = 'In Flight';
       statusClass =
-        'bg-blue-100 text-blue-800 dark:bg-blue-800 dark:text-blue-100'
+        'bg-blue-100 text-blue-800 dark:bg-blue-800 dark:text-blue-100';
     }
 
     if (deletingMessageIds.has(message.id)) {
-      status = 'Deleting'
-      statusClass = 'bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-100'
+      status = 'Deleting';
+      statusClass = 'bg-red-100 text-red-800 dark:bg-red-800 dark:text-red-100';
     }
 
     return (
@@ -305,24 +499,24 @@ export default function QueueDetail({
       >
         {status}
       </span>
-    )
-  }
+    );
+  };
 
   const getQueueStats = () => {
-    const messageCount = messages.length
+    const messageCount = messages.length;
     const avgMessageSize =
       messageCount > 0
         ? messages.reduce((sum, msg) => sum + msg.body.length, 0) / messageCount
-        : 0
+        : 0;
 
-    let oldestMessageTime = 'N/A'
+    let oldestMessageTime = 'N/A';
     if (messageCount > 0) {
       const timestamps = messages
         .map((msg) => msg.timestamp || 0)
-        .filter((t) => t > 0)
+        .filter((t) => t > 0);
       if (timestamps.length > 0) {
-        const oldestTimestamp = Math.min(...timestamps)
-        oldestMessageTime = new Date(oldestTimestamp).toLocaleString()
+        const oldestTimestamp = Math.min(...timestamps);
+        oldestMessageTime = new Date(oldestTimestamp).toLocaleString();
       }
     }
 
@@ -331,27 +525,27 @@ export default function QueueDetail({
       avgMessageSize: Math.round(avgMessageSize),
       oldestMessage: oldestMessageTime,
       activeRefresh: autoRefreshEnabled,
-    }
-  }
+    };
+  };
 
-  const stats = getQueueStats()
+  const stats = getQueueStats();
 
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(
     null,
-  )
-  const [isProduceModalOpen, setIsProduceModalOpen] = useState(false)
+  );
+  const [isProduceModalOpen, setIsProduceModalOpen] = useState(false);
 
   const toggleMessageDetails = (messageId: string) => {
     if (selectedMessageId === messageId) {
-      setSelectedMessageId(null)
+      setSelectedMessageId(null);
     } else {
-      setSelectedMessageId(messageId)
+      setSelectedMessageId(messageId);
     }
-  }
+  };
 
   const toggleProduceModal = () => {
-    setIsProduceModalOpen(!isProduceModalOpen)
-  }
+    setIsProduceModalOpen(!isProduceModalOpen);
+  };
 
   return (
     <div className="space-y-6">
@@ -366,6 +560,15 @@ export default function QueueDetail({
               className="hidden"
             >
               Produce Message
+            </button>
+            <button
+              id="redrive-all-messages-button"
+              type="button"
+              onClick={handleOpenRedriveAllModal}
+              className="hidden"
+              disabled={!isDeadLetterQueue}
+            >
+              Redrive All Messages
             </button>
           </div>
           <div className="mt-5">
@@ -438,6 +641,36 @@ export default function QueueDetail({
                 {loading ? 'Refreshing...' : 'Refresh'}
               </button>
             </div>
+            {redriveTaskStatus?.hasRunningTask && (
+              <div className="mt-3">
+                <div className="text-sm text-green-700 dark:text-green-400">
+                  Redrive task is currently running
+                  {typeof redriveTaskStatus.runningTask
+                    ?.ApproximateNumberOfMessagesMoved === 'number' &&
+                  typeof redriveTaskStatus.runningTask
+                    ?.ApproximateNumberOfMessagesToMove === 'number'
+                    ? ` (${redriveTaskStatus.runningTask.ApproximateNumberOfMessagesMoved}/${redriveTaskStatus.runningTask.ApproximateNumberOfMessagesToMove} moved)`
+                    : ''}
+                  .
+                </div>
+                {redriveTaskStatus.runningTask?.Status === 'RUNNING' &&
+                  redriveTaskStatus.runningTask?.TaskHandle && (
+                    <button
+                      type="button"
+                      onClick={handleOpenCancelMoveTaskModal}
+                      disabled={cancellingRedriveTask}
+                      className="mt-2 inline-flex items-center px-2 py-1 border border-red-300 dark:border-red-700 text-xs font-medium rounded text-red-700 dark:text-red-300 bg-white dark:bg-gray-700 hover:bg-red-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-1 focus:ring-red-500 disabled:opacity-50"
+                    >
+                      Cancel Move Task
+                    </button>
+                  )}
+                {cancelRedriveError && (
+                  <div className="mt-2 text-sm text-red-600 dark:text-red-400">
+                    {cancelRedriveError}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -547,23 +780,23 @@ export default function QueueDetail({
                 <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                   {[...messages]
                     .sort((a, b) => {
-                      const aTimestamp = a.timestamp || 0
-                      const bTimestamp = b.timestamp || 0
+                      const aTimestamp = a.timestamp || 0;
+                      const bTimestamp = b.timestamp || 0;
                       return sortDirection === 'asc'
                         ? aTimestamp - bTimestamp
-                        : bTimestamp - aTimestamp
+                        : bTimestamp - aTimestamp;
                     })
                     .map((message, index) => {
-                      let preview = '{}'
+                      let preview = '{}';
                       try {
-                        const parsed = JSON.parse(message.body)
+                        const parsed = JSON.parse(message.body);
                         preview =
                           JSON.stringify(parsed).substring(0, 60) +
-                          (JSON.stringify(parsed).length > 60 ? '...' : '')
+                          (JSON.stringify(parsed).length > 60 ? '...' : '');
                       } catch {
                         preview =
                           message.body.substring(0, 60) +
-                          (message.body.length > 60 ? '...' : '')
+                          (message.body.length > 60 ? '...' : '');
                       }
 
                       return (
@@ -592,12 +825,15 @@ export default function QueueDetail({
                             <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                               <button
                                 onClick={(e) => {
-                                  e.stopPropagation()
-                                  handleOpenRedriveModal(message)
+                                  e.stopPropagation();
+                                  handleOpenRedriveModal(message);
                                 }}
                                 disabled={
-                                  deadLetterSourceQueues.length === 0 ||
-                                  redrivingMessageIds.has(message.id)
+                                  groupedRedriveTargetQueueOptions
+                                    .sourceQueueOptions.length +
+                                    groupedRedriveTargetQueueOptions
+                                      .otherQueueOptions.length ===
+                                    0 || redrivingMessageIds.has(message.id)
                                 }
                                 className="text-indigo-600 dark:text-indigo-400 hover:text-indigo-900 dark:hover:text-indigo-300 disabled:opacity-50 mr-4"
                               >
@@ -607,8 +843,8 @@ export default function QueueDetail({
                               </button>
                               <button
                                 onClick={(e) => {
-                                  e.stopPropagation()
-                                  handleDeleteMessage(message)
+                                  e.stopPropagation();
+                                  handleDeleteMessage(message);
                                 }}
                                 disabled={deletingMessageIds.has(message.id)}
                                 className="text-red-600 dark:text-red-400 hover:text-red-900 dark:hover:text-red-300 disabled:opacity-50"
@@ -631,7 +867,7 @@ export default function QueueDetail({
                             </tr>
                           )}
                         </Fragment>
-                      )
+                      );
                     })}
                 </tbody>
               </table>
@@ -689,8 +925,8 @@ export default function QueueDetail({
                           theme="dracula"
                           value={messageInput}
                           onChange={(value) => {
-                            setMessageInput(value)
-                            validateJson(value)
+                            setMessageInput(value);
+                            validateJson(value);
                           }}
                           name="message-editor"
                           editorProps={{ $blockScrolling: true }}
@@ -716,9 +952,9 @@ export default function QueueDetail({
                       <button
                         type="button"
                         onClick={() => {
-                          handleSendMessage()
+                          handleSendMessage();
                           if (!sendError) {
-                            toggleProduceModal()
+                            toggleProduceModal();
                           }
                         }}
                         disabled={
@@ -741,7 +977,7 @@ export default function QueueDetail({
         key={selectedMessageForRedrive?.id}
         isOpen={!!selectedMessageForRedrive}
         message={selectedMessageForRedrive}
-        deadLetterSourceQueues={deadLetterSourceQueues}
+        groupedQueueOptions={groupedRedriveTargetQueueOptions}
         isSubmitting={
           !!selectedMessageForRedrive &&
           redrivingMessageIds.has(selectedMessageForRedrive.id)
@@ -750,6 +986,23 @@ export default function QueueDetail({
         onClose={handleCloseRedriveMessageModal}
         onConfirm={handleRedriveMessage}
       />
+
+      <RedriveAllMessagesModal
+        isOpen={isRedriveAllModalOpen}
+        groupedQueueOptions={groupedRedriveTargetQueueOptions}
+        isSubmitting={redrivingAllMessages}
+        error={redriveAllError}
+        onClose={handleCloseRedriveAllModal}
+        onConfirm={handleRedriveAllMessages}
+      />
+
+      <CancelMoveTaskModal
+        isOpen={isCancelMoveTaskModalOpen}
+        isSubmitting={cancellingRedriveTask}
+        error={cancelRedriveError}
+        onClose={handleCloseCancelMoveTaskModal}
+        onConfirm={handleCancelRedriveTask}
+      />
     </div>
-  )
+  );
 }

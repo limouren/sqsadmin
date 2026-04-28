@@ -8,10 +8,15 @@ import {
   GetQueueAttributesCommand,
   CreateQueueCommand,
   DeleteQueueCommand,
+  StartMessageMoveTaskCommand,
+  ListMessageMoveTasksCommand,
+  CancelMessageMoveTaskCommand,
+  ListMessageMoveTasksResultEntry,
 } from '@aws-sdk/client-sqs';
 
 import { SQSClientConfig } from '@aws-sdk/client-sqs';
 import { doesQueueNameMatchPattern } from './permission';
+import { getQueueNameFromUrl } from './queue';
 
 // Configure SQS client
 const clientConfig: SQSClientConfig = {
@@ -59,7 +64,7 @@ function filterQueueUrlsByPatterns(
   }
 
   return queueUrls.filter((url) => {
-    const queueName = url.split('/').pop() || url;
+    const queueName = getQueueNameFromUrl(url);
     return queueNamePatterns.some((pattern) =>
       doesQueueNameMatchPattern(queueName, pattern),
     );
@@ -96,7 +101,7 @@ export async function listQueues(
       items: await Promise.all(
         filteredQueueUrls.map(async (url) => ({
           url,
-          name: url.split('/').pop() || url,
+          name: getQueueNameFromUrl(url),
           deadLetterSourceQueues: await listDeadLetterSourceQueues(url),
         })),
       ),
@@ -456,6 +461,7 @@ export async function redriveMessage(
   sourceQueueUrl: string,
   targetQueueUrl: string,
   messageId: string,
+  messageBody: string,
 ) {
   const message = await receiveMessageById(sourceQueueUrl, messageId);
 
@@ -472,7 +478,7 @@ export async function redriveMessage(
     MessageDeduplicationId?: string;
   } = {
     QueueUrl: targetQueueUrl,
-    MessageBody: message.body,
+    MessageBody: messageBody,
   };
 
   await client.send(new SendMessageCommand(commandInput));
@@ -487,6 +493,171 @@ export async function redriveMessage(
       `Message ${messageId} was sent to ${targetQueueUrl} but could not be deleted from ${sourceQueueUrl}. Avoid retrying redrive to prevent duplicates.`,
     );
   }
+}
+
+async function manuallyRedriveAllMessages(
+  sourceQueueUrl: string,
+  targetQueueUrl: string,
+  maxNumberOfMessagesPerSecond?: number,
+): Promise<void> {
+  const delayBetweenMessagesMs = maxNumberOfMessagesPerSecond
+    ? Math.ceil(1000 / maxNumberOfMessagesPerSecond)
+    : 0;
+
+  let movedCount = 0;
+
+  while (true) {
+    const response = await client.send(
+      new ReceiveMessageCommand({
+        QueueUrl: sourceQueueUrl,
+        MaxNumberOfMessages: 10,
+        AttributeNames: ['All'],
+        MessageAttributeNames: ['All'],
+        VisibilityTimeout: 30,
+        WaitTimeSeconds: 1,
+      }),
+    );
+
+    const messages = response.Messages || [];
+
+    if (messages.length === 0) {
+      break;
+    }
+
+    for (const message of messages) {
+      const receiptHandle = message.ReceiptHandle;
+      const messageId = message.MessageId || 'unknown';
+
+      if (!receiptHandle) {
+        continue;
+      }
+
+      const commandInput: {
+        QueueUrl: string;
+        MessageBody: string;
+        MessageGroupId?: string;
+        MessageDeduplicationId?: string;
+      } = {
+        QueueUrl: targetQueueUrl,
+        MessageBody: message.Body || '',
+      };
+
+      const messageGroupId = message.Attributes?.MessageGroupId;
+      const messageDeduplicationId = message.Attributes?.MessageDeduplicationId;
+
+      if (messageGroupId) {
+        commandInput.MessageGroupId = messageGroupId;
+      }
+
+      if (messageDeduplicationId) {
+        commandInput.MessageDeduplicationId = messageDeduplicationId;
+      }
+
+      await client.send(new SendMessageCommand(commandInput));
+
+      const deletedFromSourceQueue = await deleteMessage(
+        sourceQueueUrl,
+        receiptHandle,
+      );
+
+      if (!deletedFromSourceQueue) {
+        throw new Error(
+          `Message ${messageId} was sent to ${targetQueueUrl} but could not be deleted from ${sourceQueueUrl}. Avoid retrying redrive to prevent duplicates.`,
+        );
+      }
+
+      movedCount += 1;
+
+      if (delayBetweenMessagesMs > 0) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, delayBetweenMessagesMs),
+        );
+      }
+    }
+  }
+
+  console.log(
+    `Manual redrive completed. Moved ${movedCount} messages from ${sourceQueueUrl} to ${targetQueueUrl}`,
+  );
+}
+
+export async function redriveAllMessages(
+  sourceQueueUrl: string,
+  targetQueueUrl: string,
+  maxNumberOfMessagesPerSecond?: number,
+): Promise<string | undefined> {
+  try {
+    const sourceAttributes = await getQueueAttributes(sourceQueueUrl);
+    const sourceArn = sourceAttributes.QueueArn;
+
+    const targetAttributes = await getQueueAttributes(targetQueueUrl);
+    const targetArn = targetAttributes.QueueArn;
+
+    if (!sourceArn || !targetArn) {
+      throw new Error('Queue ARN not available for StartMessageMoveTask');
+    }
+
+    const command = new StartMessageMoveTaskCommand({
+      SourceArn: sourceArn,
+      DestinationArn: targetArn,
+      MaxNumberOfMessagesPerSecond: maxNumberOfMessagesPerSecond,
+    });
+
+    const response = await client.send(command);
+    return response.TaskHandle;
+  } catch (error) {
+    console.warn(
+      'StartMessageMoveTask failed. Falling back to manual redrive.',
+      error,
+    );
+
+    await manuallyRedriveAllMessages(
+      sourceQueueUrl,
+      targetQueueUrl,
+      maxNumberOfMessagesPerSecond,
+    );
+
+    return undefined;
+  }
+}
+
+export async function listMessageMoveTasks(
+  sourceQueueUrl: string,
+  maxResults: number = 10,
+): Promise<ListMessageMoveTasksResultEntry[]> {
+  try {
+    const sourceAttributes = await getQueueAttributes(sourceQueueUrl);
+    const sourceArn = sourceAttributes.QueueArn;
+
+    if (!sourceArn) {
+      return [];
+    }
+
+    const command = new ListMessageMoveTasksCommand({
+      SourceArn: sourceArn,
+      MaxResults: Math.min(Math.max(maxResults, 1), 10),
+    });
+
+    const response = await client.send(command);
+    return response.Results || [];
+  } catch (error) {
+    console.error(
+      `Error listing message move tasks for queue ${sourceQueueUrl}:`,
+      error,
+    );
+    return [];
+  }
+}
+
+export async function cancelMessageMoveTask(
+  taskHandle: string,
+): Promise<number | undefined> {
+  const command = new CancelMessageMoveTaskCommand({
+    TaskHandle: taskHandle,
+  });
+
+  const response = await client.send(command);
+  return response.ApproximateNumberOfMessagesMoved;
 }
 
 export interface CreateQueueParams {
